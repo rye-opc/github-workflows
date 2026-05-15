@@ -76,7 +76,7 @@ jobs:
           [[ "$GITOPS_REPO" =~ $safe_name_re ]] || { echo "::error::Invalid gitops_repo"; exit 1; }
           [[ "$GITOPS_REF" =~ $safe_name_re ]] || { echo "::error::Invalid gitops_ref"; exit 1; }
           [[ "$IMAGE_TAG" =~ $safe_tag_re ]] || { echo "::error::Invalid image_tag"; exit 1; }
-          [[ "$YQ_VERSION" =~ '^[0-9]+\\.[0-9]+\\.[0-9]+$' ]] || { echo "::error::Invalid yq_version"; exit 1; }
+          [[ "$YQ_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Invalid yq_version"; exit 1; }
 
           if [[ -n "$EXTRA_TAG_FILES" ]]; then
             for f in $EXTRA_TAG_FILES; do
@@ -85,7 +85,7 @@ jobs:
           fi
 
       - name: Checkout GitOps repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           repository: ${{ github.repository_owner }}/${{ inputs.gitops_repo }}
           ref: ${{ inputs.gitops_ref }}
