@@ -117,10 +117,48 @@ jobs:
           base="https://github.com/mikefarah/yq/releases/download/${yq_v}"
 
           curl -fsSL -o ./yq "${base}/yq_linux_${yq_arch}"
-          curl -fsSL -o ./checksums "${base}/checksums"
-
           # Verify checksum from the upstream checksums manifest.
-          grep " yq_linux_${yq_arch}$" ./checksums | sha256sum -c -
+          #
+          # Prefer `checksums-bsd` (stable, grep-friendly). Fall back to extracting SHA-256
+          # from `checksums` + `checksums_hashes_order` if needed.
+          expected=""
+
+          if curl -fsSL -o ./checksums-bsd "${base}/checksums-bsd"; then
+            expected="$(
+              awk -v f="yq_linux_${yq_arch}" \
+                '$0 ~ ("^SHA256 \\(" f "\\) = ") {sub(/.*= /,""); print; exit}' \
+                ./checksums-bsd
+            )"
+          else
+            curl -fsSL -o ./checksums "${base}/checksums"
+            curl -fsSL -o ./checksums_hashes_order "${base}/checksums_hashes_order"
+
+            # Match the upstream helper script behavior (extract-checksum.sh).
+            ln="$(grep -m 1 -n "^SHA-256$" ./checksums_hashes_order | cut -f1 -d: || true)"
+            if [[ -n "$ln" ]]; then
+              col="$((ln + 1))"
+              expected="$(
+                grep -m 1 -E "^yq_linux_${yq_arch}(\\s|$)" ./checksums \
+                  | sed 's/ /\t/g' \
+                  | cut -f1,"$col" \
+                  | awk '{print $2}' \
+                  || true
+              )"
+            fi
+          fi
+
+          if [[ -z "$expected" ]]; then
+            echo "::error::Unable to find SHA256 for yq_linux_${yq_arch} in release checksums"
+            exit 1
+          fi
+
+          actual="$(sha256sum ./yq | awk '{print $1}')"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::Checksum mismatch for yq_linux_${yq_arch}"
+            echo "expected=$expected"
+            echo "actual=$actual"
+            exit 1
+          fi
 
           chmod +x ./yq
 
