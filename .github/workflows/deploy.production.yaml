@@ -1,0 +1,107 @@
+name: "Deploy: Production"
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        required: true
+        type: string
+      dockerfile_path:
+        type: string
+        default: "./Dockerfile"
+      build_context:
+        type: string
+        default: "."
+      build_args:
+        type: string
+        default: ""
+      helmrelease_name:
+        description: "Name of the HelmRelease YAML file (without .yaml). Defaults to app_name if not set."
+        type: string
+        default: ""
+      extra_tag_files:
+        description: "Space-separated list of additional HelmRelease files to update with the same image tag"
+        type: string
+        default: ""
+      runs_on:
+        type: string
+        default: "ubuntu-latest"
+    secrets:
+      DEPLOY_TOKEN:
+        required: false
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+
+jobs:
+  notify-start:
+    uses: ./.github/workflows/notify.telegram.yaml
+    with:
+      app_name: ${{ inputs.app_name }}
+      environment: production
+      status: running
+      runs_on: ${{ inputs.runs_on }}
+    secrets:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+  push:
+    uses: ./.github/workflows/build.push.yaml
+    with:
+      app_name: ${{ inputs.app_name }}
+      dockerfile_path: ${{ inputs.dockerfile_path }}
+      build_context: ${{ inputs.build_context }}
+      build_args: ${{ inputs.build_args }}
+      runs_on: ${{ inputs.runs_on }}
+    secrets:
+      DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+
+  approval:
+    needs: push
+    runs-on: ${{ inputs.runs_on }}
+    environment: production
+    steps:
+      - run: echo "Approved for production deployment"
+
+  deploy:
+    needs: [push, approval]
+    uses: ./.github/workflows/deploy.update-tag.yaml
+    with:
+      app_name: ${{ inputs.app_name }}
+      helmrelease_name: ${{ inputs.helmrelease_name }}
+      image_tag: ${{ needs.push.outputs.image_tag }}
+      environment: production
+      extra_tag_files: ${{ inputs.extra_tag_files }}
+      runs_on: ${{ inputs.runs_on }}
+    secrets:
+      DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+
+  summary:
+    needs: deploy
+    runs-on: ${{ inputs.runs_on }}
+    steps:
+      - run: |
+          echo "## Deployed to Production" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| App | ${{ inputs.app_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | production |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | ${{ needs.push.outputs.image_url }} |" >> $GITHUB_STEP_SUMMARY
+
+  notify:
+    if: always()
+    needs: [notify-start, push, approval, deploy, summary]
+    uses: ./.github/workflows/notify.telegram.yaml
+    with:
+      app_name: ${{ inputs.app_name }}
+      environment: production
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      image_tag: ${{ needs.push.outputs.image_tag }}
+      message_id: ${{ needs.notify-start.outputs.message_id }}
+      delay_seconds: ${{ contains(needs.*.result, 'failure') && 0 || 90 }}
+      runs_on: ${{ inputs.runs_on }}
+    secrets:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+

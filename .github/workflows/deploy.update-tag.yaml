@@ -1,0 +1,198 @@
+name: "Deploy: Update Tag"
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        required: true
+        type: string
+      helmrelease_name:
+        description: "Name of the HelmRelease YAML file (without .yaml). Defaults to app_name if not set."
+        type: string
+        default: ""
+      image_tag:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      extra_tag_files:
+        description: "Space-separated list of additional HelmRelease files (without .yaml) to update with the same image tag"
+        type: string
+        default: ""
+      gitops_repo:
+        description: "GitOps repo name under the same owner/org (no slashes)."
+        type: string
+        default: "rye-charts"
+      gitops_ref:
+        description: "Branch or ref to update in gitops_repo."
+        type: string
+        default: "main"
+      runs_on:
+        type: string
+        # Safer default for public reusable workflows; override to self-hosted if desired.
+        default: "ubuntu-latest"
+      yq_version:
+        description: "mikefarah/yq version (without leading v)."
+        type: string
+        default: "4.47.2"
+    secrets:
+      DEPLOY_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitops-${{ inputs.gitops_repo }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ${{ inputs.runs_on }}
+    steps:
+      - name: Validate inputs
+        shell: bash
+        env:
+          APP_NAME: ${{ inputs.app_name }}
+          HELMRELEASE_NAME: ${{ inputs.helmrelease_name }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          EXTRA_TAG_FILES: ${{ inputs.extra_tag_files }}
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+          GITOPS_REF: ${{ inputs.gitops_ref }}
+          YQ_VERSION: ${{ inputs.yq_version }}
+        run: |
+          set -euo pipefail
+
+          # Avoid command/path injection: only allow a safe subset.
+          safe_name_re='^[A-Za-z0-9._-]+$'
+          safe_env_re='^[A-Za-z0-9_-]+$'
+          safe_tag_re='^[A-Za-z0-9._-]+$'
+
+          [[ "$APP_NAME" =~ $safe_name_re ]] || { echo "::error::Invalid app_name"; exit 1; }
+          [[ -z "$HELMRELEASE_NAME" || "$HELMRELEASE_NAME" =~ $safe_name_re ]] || { echo "::error::Invalid helmrelease_name"; exit 1; }
+          [[ "$ENVIRONMENT" =~ $safe_env_re ]] || { echo "::error::Invalid environment"; exit 1; }
+          [[ "$GITOPS_REPO" =~ $safe_name_re ]] || { echo "::error::Invalid gitops_repo"; exit 1; }
+          [[ "$GITOPS_REF" =~ $safe_name_re ]] || { echo "::error::Invalid gitops_ref"; exit 1; }
+          [[ "$IMAGE_TAG" =~ $safe_tag_re ]] || { echo "::error::Invalid image_tag"; exit 1; }
+          [[ "$YQ_VERSION" =~ '^[0-9]+\\.[0-9]+\\.[0-9]+$' ]] || { echo "::error::Invalid yq_version"; exit 1; }
+
+          if [[ -n "$EXTRA_TAG_FILES" ]]; then
+            for f in $EXTRA_TAG_FILES; do
+              [[ "$f" =~ $safe_name_re ]] || { echo "::error::Invalid extra_tag_files entry: $f"; exit 1; }
+            done
+          fi
+
+      - name: Checkout GitOps repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: ${{ github.repository_owner }}/${{ inputs.gitops_repo }}
+          ref: ${{ inputs.gitops_ref }}
+          token: ${{ secrets.DEPLOY_TOKEN }}
+          fetch-depth: 0
+          path: gitops
+
+      - name: Install yq (pinned + checksum)
+        shell: bash
+        working-directory: gitops
+        env:
+          YQ_VERSION: ${{ inputs.yq_version }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$(uname -s)" != "Linux" ]]; then
+            echo "::error::This workflow currently supports Linux runners only."
+            exit 1
+          fi
+
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64) yq_arch="amd64" ;;
+            aarch64|arm64) yq_arch="arm64" ;;
+            *) echo "::error::Unsupported arch: $arch"; exit 1 ;;
+          esac
+
+          yq_v="v${YQ_VERSION}"
+          base="https://github.com/mikefarah/yq/releases/download/${yq_v}"
+
+          curl -fsSL -o ./yq "${base}/yq_linux_${yq_arch}"
+          curl -fsSL -o ./checksums "${base}/checksums"
+
+          # Verify checksum from the upstream checksums manifest.
+          grep " yq_linux_${yq_arch}$" ./checksums | sha256sum -c -
+
+          chmod +x ./yq
+
+      - name: Update image tag and push
+        shell: bash
+        working-directory: gitops
+        env:
+          APP_NAME: ${{ inputs.app_name }}
+          HELMRELEASE_NAME: ${{ inputs.helmrelease_name }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          EXTRA_TAG_FILES: ${{ inputs.extra_tag_files }}
+          GITOPS_REF: ${{ inputs.gitops_ref }}
+        run: |
+          set -euo pipefail
+
+          hr_name="${HELMRELEASE_NAME:-$APP_NAME}"
+          file="apps/${ENVIRONMENT}/${hr_name}.yaml"
+
+          if [[ ! -f "$file" ]]; then
+            echo "::error::File not found: $file"
+            exit 1
+          fi
+
+          echo "Updating main file: $file"
+          ./yq -i '.spec.values.image.tag = strenv(IMAGE_TAG)' "$file"
+
+          files_to_commit=("$file")
+
+          if [[ -n "$EXTRA_TAG_FILES" ]]; then
+            read -r -a extras <<< "$EXTRA_TAG_FILES"
+            for extra in "${extras[@]}"; do
+              extra_file="apps/${ENVIRONMENT}/${extra}.yaml"
+              if [[ -f "$extra_file" ]]; then
+                ./yq -i '.spec.values.image.tag = strenv(IMAGE_TAG)' "$extra_file"
+                echo "Updated $extra_file"
+                files_to_commit+=("$extra_file")
+              else
+                echo "::warning::Extra tag file not found: $extra_file"
+              fi
+            done
+          fi
+
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+          echo "Staging only relevant files..."
+          git add "${files_to_commit[@]}"
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git commit -m "deploy(${APP_NAME}): ${ENVIRONMENT} @ ${IMAGE_TAG}"
+
+          echo "Pushing with retry (handle race conditions)..."
+          for i in {1..5}; do
+            if git push origin "HEAD:${GITOPS_REF}"; then
+              echo "Push succeeded"
+              exit 0
+            fi
+
+            echo "Push failed (attempt $i), rebasing..."
+            git fetch origin "${GITOPS_REF}"
+            git rebase "origin/${GITOPS_REF}" || {
+              echo "Rebase failed, aborting"
+              git rebase --abort
+              exit 1
+            }
+          done
+
+          echo "::error::Failed to push after multiple attempts"
+          exit 1
+

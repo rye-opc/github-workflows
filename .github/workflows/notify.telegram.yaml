@@ -1,0 +1,129 @@
+name: "Notify: Telegram"
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      status:
+        required: true
+        type: string
+      image_tag:
+        type: string
+        default: ""
+      message_id:
+        type: string
+        default: ""
+      delay_seconds:
+        type: number
+        default: 0
+      runs_on:
+        type: string
+        default: "ubuntu-latest"
+    secrets:
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+    outputs:
+      message_id:
+        description: "Telegram message ID for later editing"
+        value: ${{ jobs.notify.outputs.message_id }}
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ${{ inputs.runs_on }}
+    outputs:
+      message_id: ${{ steps.send.outputs.message_id }}
+    steps:
+      - name: Wait before sending
+        if: inputs.delay_seconds > 0
+        run: |
+          echo "Waiting ${{ inputs.delay_seconds }}s for rollout..."
+          sleep ${{ inputs.delay_seconds }}
+
+      - name: Send Telegram alert
+        id: send
+        if: secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != ''
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ inputs.status }}" = "failure" ]; then
+            ICON="❌"
+            LABEL="Deploy Failed"
+          elif [ "${{ inputs.status }}" = "running" ]; then
+            ICON="⏳"
+            LABEL="Deploying..."
+          else
+            ICON="🚀"
+            LABEL="Deploy Succeeded"
+          fi
+
+          COMMIT="${{ inputs.image_tag }}"
+          COMMIT_SHORT="${COMMIT:0:7}"
+          COMMIT_URL="${{ github.server_url }}/${{ github.repository }}/commit/${COMMIT}"
+
+          TEXT=$(cat <<'MSGEOF'
+          <blockquote>
+          <b>ICON_PH LABEL_PH</b>
+
+          📦 <b>App:</b>  <code>APP_PH</code>
+          🌍 <b>Env:</b>  ENV_PH
+          🌿 <b>Branch:</b>  BRANCH_PH
+          🔖 <b>Commit:</b>  <a href="COMMIT_URL_PH">COMMIT_SHORT_PH</a>
+          👤 <b>By:</b>  BY_PH
+
+          <a href="RUN_URL_PH">› View Run</a>
+          </blockquote>
+          MSGEOF
+          )
+
+          TEXT="${TEXT//ICON_PH/$ICON}"
+          TEXT="${TEXT//LABEL_PH/$LABEL}"
+          TEXT="${TEXT//APP_PH/${{ inputs.app_name }}}"
+          TEXT="${TEXT//ENV_PH/${{ inputs.environment }}}"
+          TEXT="${TEXT//BRANCH_PH/${{ github.ref_name }}}"
+          TEXT="${TEXT//COMMIT_URL_PH/$COMMIT_URL}"
+          TEXT="${TEXT//COMMIT_SHORT_PH/$COMMIT_SHORT}"
+          TEXT="${TEXT//BY_PH/${{ github.actor }}}"
+          TEXT="${TEXT//RUN_URL_PH/${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}}"
+
+          MESSAGE_ID="${{ inputs.message_id }}"
+
+          if [ -n "$MESSAGE_ID" ]; then
+            # Edit existing message; fall back to sending a new one if edit fails
+            RESPONSE=$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d message_id="${MESSAGE_ID}" \
+              -d parse_mode=HTML \
+              -d text="${TEXT}" || true)
+
+            OK=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok', False))" 2>/dev/null || echo "False")
+
+            if [ "$OK" = "True" ]; then
+              echo "message_id=${MESSAGE_ID}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "::warning::editMessageText failed, falling back to sendMessage"
+          fi
+
+          RESPONSE=$(curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode=HTML \
+            -d text="${TEXT}")
+
+          MSG_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['message_id'])")
+
+          echo "message_id=${MSG_ID}" >> "$GITHUB_OUTPUT"
+

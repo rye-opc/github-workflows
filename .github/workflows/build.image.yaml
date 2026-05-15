@@ -1,0 +1,50 @@
+name: "Build: Image"
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        required: true
+        type: string
+      dockerfile_path:
+        type: string
+        default: "./Dockerfile"
+      build_context:
+        type: string
+        default: "."
+      build_args:
+        type: string
+        default: ""
+      runs_on:
+        type: string
+        default: "ubuntu-latest"
+    outputs:
+      image_tag:
+        description: "Image tag (git SHA)"
+        value: ${{ jobs.build.outputs.image_tag }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runs_on }}
+    outputs:
+      image_tag: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+
+      - name: Build image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ${{ inputs.build_context }}
+          file: ${{ inputs.dockerfile_path }}
+          push: false
+          load: true
+          tags: ${{ inputs.app_name }}:${{ github.sha }}
+          build-args: ${{ inputs.build_args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+

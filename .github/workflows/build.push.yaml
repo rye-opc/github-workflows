@@ -1,0 +1,76 @@
+name: "Build: Push"
+
+permissions:
+  contents: read
+  packages: write
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        required: true
+        type: string
+      dockerfile_path:
+        type: string
+        default: "./Dockerfile"
+      build_context:
+        type: string
+        default: "."
+      build_args:
+        type: string
+        default: ""
+      registry:
+        type: string
+        default: "ghcr.io"
+      runs_on:
+        type: string
+        default: "ubuntu-latest"
+    outputs:
+      image_tag:
+        description: "Image tag (git SHA)"
+        value: ${{ jobs.push.outputs.image_tag }}
+      image_url:
+        description: "Full image URL"
+        value: ${{ jobs.push.outputs.image_url }}
+    secrets:
+      DEPLOY_TOKEN:
+        description: "Optional. Falls back to GITHUB_TOKEN."
+        required: false
+
+concurrency:
+  group: docker-build-${{ github.repository }}-${{ inputs.runs_on }}-${{ inputs.app_name }}
+  cancel-in-progress: false
+
+jobs:
+  push:
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 120
+    outputs:
+      image_tag: ${{ github.sha }}
+      image_url: ${{ inputs.registry }}/${{ github.repository_owner }}/${{ inputs.app_name }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+
+      - name: Login to registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.DEPLOY_TOKEN || github.token }}
+
+      - name: Build and push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ${{ inputs.build_context }}
+          file: ${{ inputs.dockerfile_path }}
+          push: true
+          platforms: linux/arm64
+          tags: |
+            ${{ inputs.registry }}/${{ github.repository_owner }}/${{ inputs.app_name }}:${{ github.sha }}
+            ${{ inputs.registry }}/${{ github.repository_owner }}/${{ inputs.app_name }}:latest
+          build-args: ${{ inputs.build_args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
