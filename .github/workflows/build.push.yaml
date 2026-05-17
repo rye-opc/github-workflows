@@ -2,7 +2,6 @@ name: "Build: Push"
 
 permissions:
   contents: read
-  packages: write
 
 on:
   workflow_call:
@@ -34,8 +33,8 @@ on:
         value: ${{ jobs.push.outputs.image_url }}
     secrets:
       DEPLOY_TOKEN:
-        description: "Optional. Falls back to GITHUB_TOKEN."
-        required: false
+        description: "Required. Personal access token used to push to registry."
+        required: true
 
 concurrency:
   group: docker-build-${{ github.repository }}-${{ inputs.runs_on }}-${{ inputs.app_name }}
@@ -58,7 +57,7 @@ jobs:
         with:
           registry: ${{ inputs.registry }}
           username: ${{ github.actor }}
-          password: ${{ secrets.DEPLOY_TOKEN || github.token }}
+          password: ${{ secrets.DEPLOY_TOKEN }}
 
       - name: Build and push
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
