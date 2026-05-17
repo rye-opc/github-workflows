@@ -40,6 +40,9 @@ permissions:
 jobs:
   notify:
     runs-on: ${{ inputs.runs_on }}
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
     outputs:
       message_id: ${{ steps.send.outputs.message_id }}
     steps:
@@ -51,10 +54,7 @@ jobs:
 
       - name: Send Telegram alert
         id: send
-        if: secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != ''
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        if: ${{ env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
         run: |
           set -euo pipefail
 
