@@ -24,6 +24,18 @@ on:
       runs_on:
         type: string
         default: "ubuntu-latest"
+      skip_if_exists:
+        description: >-
+          If true, skip the build when an image for this commit SHA already exists in the
+          registry (e.g. it was built for staging). The existing image is reused as-is.
+        type: boolean
+        default: false
+      extra_tags:
+        description: >-
+          Space-separated list of additional image tags to apply (e.g. the git tag name).
+          Applied whether the image is built or reused.
+        type: string
+        default: ""
     outputs:
       image_tag:
         description: "Image tag (git SHA)"
@@ -31,6 +43,9 @@ on:
       image_url:
         description: "Full image URL"
         value: ${{ jobs.push.outputs.image_url }}
+      reused:
+        description: "true if an existing image was reused instead of built"
+        value: ${{ jobs.push.outputs.reused }}
     secrets:
       DEPLOY_TOKEN:
         description: "Required. Personal access token used to push to registry."
@@ -44,9 +59,12 @@ jobs:
   push:
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 120
+    env:
+      IMAGE_BASE: ${{ inputs.registry }}/${{ github.repository_owner }}/${{ inputs.app_name }}
     outputs:
       image_tag: ${{ github.sha }}
       image_url: ${{ inputs.registry }}/${{ github.repository_owner }}/${{ inputs.app_name }}:${{ github.sha }}
+      reused: ${{ steps.check.outputs.exists == 'true' }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -59,7 +77,36 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.DEPLOY_TOKEN }}
 
+      - name: Validate extra tags
+        if: inputs.extra_tags != ''
+        shell: bash
+        env:
+          EXTRA_TAGS: ${{ inputs.extra_tags }}
+        run: |
+          set -euo pipefail
+          safe_tag_re='^[A-Za-z0-9._-]+$'
+          for t in $EXTRA_TAGS; do
+            [[ "$t" =~ $safe_tag_re ]] || { echo "::error::Invalid extra tag: $t"; exit 1; }
+          done
+
+      - name: Check for existing image
+        id: check
+        if: inputs.skip_if_exists
+        shell: bash
+        env:
+          IMAGE: ${{ env.IMAGE_BASE }}:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "Image already exists, skipping build: $IMAGE"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Image not found, building: $IMAGE"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push
+        if: steps.check.outputs.exists != 'true'
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
         with:
           context: ${{ inputs.build_context }}
@@ -67,9 +114,23 @@ jobs:
           push: true
           platforms: linux/arm64
           tags: |
-            ${{ inputs.registry }}/${{ github.repository_owner }}/${{ inputs.app_name }}:${{ github.sha }}
-            ${{ inputs.registry }}/${{ github.repository_owner }}/${{ inputs.app_name }}:latest
+            ${{ env.IMAGE_BASE }}:${{ github.sha }}
+            ${{ env.IMAGE_BASE }}:latest
           build-args: ${{ inputs.build_args }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Apply extra tags
+        if: inputs.extra_tags != ''
+        shell: bash
+        env:
+          IMAGE: ${{ env.IMAGE_BASE }}:${{ github.sha }}
+          EXTRA_TAGS: ${{ inputs.extra_tags }}
+        run: |
+          set -euo pipefail
+          args=()
+          for t in $EXTRA_TAGS; do
+            args+=(-t "${IMAGE_BASE}:${t}")
+          done
+          docker buildx imagetools create "${args[@]}" "$IMAGE"
+          echo "Tagged $IMAGE as: $EXTRA_TAGS"

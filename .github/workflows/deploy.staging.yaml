@@ -75,12 +75,14 @@ jobs:
     runs-on: ${{ inputs.runs_on }}
     steps:
       - run: |
-          echo "## Deployed to Staging" >> $GITHUB_STEP_SUMMARY
-          echo "| | |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| App | ${{ inputs.app_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Environment | staging |" >> $GITHUB_STEP_SUMMARY
-          echo "| Image | ${{ needs.push.outputs.image_url }} |" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Deployed to Staging"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| App | ${{ inputs.app_name }} |"
+            echo "| Environment | staging |"
+            echo "| Image | ${{ needs.push.outputs.image_url }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   notify:
     if: always()
