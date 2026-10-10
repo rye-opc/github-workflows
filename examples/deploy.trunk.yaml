@@ -1,0 +1,32 @@
+# Opt-in trunk-based deploy: copy to <app-repo>/.github/workflows/deploy.yaml
+#
+#   PR merged to main  -> staging
+#   git tag v*  pushed -> production (approval gate + ancestor-of-main guard)
+#
+# Release:  gh release create v1.2.3 --generate-notes
+#
+# NOTE: shared workflow defaults to runs_on: ubuntu-latest. If this app was on
+# rye-opc/rye-charts workflows (default self-hosted), add `runs_on: self-hosted`.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+jobs:
+  staging:
+    if: github.ref == 'refs/heads/main'
+    uses: rye-opc/github-workflows/.github/workflows/deploy.staging.yaml@main
+    with:
+      app_name: my-app
+    secrets: inherit
+
+  production:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: rye-opc/github-workflows/.github/workflows/deploy.production.yaml@main
+    with:
+      app_name: my-app
+      require_ancestor_of: main
+      reuse_existing_image: true
+    secrets: inherit

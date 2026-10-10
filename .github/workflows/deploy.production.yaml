@@ -26,6 +26,18 @@ on:
       runs_on:
         type: string
         default: "ubuntu-latest"
+      require_ancestor_of:
+        description: >-
+          Branch name (e.g. "main"). If set, the deployed commit must be reachable from that
+          branch, so a tag on an unmerged feature branch cannot reach production. Empty = no check.
+        type: string
+        default: ""
+      reuse_existing_image:
+        description: >-
+          If true, skip the image build when an image for this commit SHA already exists
+          (typically built by the staging deploy). Production then ships the exact staging image.
+        type: boolean
+        default: false
     secrets:
       DEPLOY_TOKEN:
         required: true
@@ -46,7 +58,42 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
+  # Always runs so downstream `needs` are never skipped; the actual check is
+  # a no-op unless `require_ancestor_of` is set.
+  guard:
+    runs-on: ${{ inputs.runs_on }}
+    steps:
+      - name: Skip (no ancestor check requested)
+        if: inputs.require_ancestor_of == ''
+        run: echo "require_ancestor_of not set; skipping ancestor check"
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        if: inputs.require_ancestor_of != ''
+        with:
+          fetch-depth: 0
+
+      - name: Verify commit is on ${{ inputs.require_ancestor_of }}
+        if: inputs.require_ancestor_of != ''
+        shell: bash
+        env:
+          BRANCH: ${{ inputs.require_ancestor_of }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::Invalid require_ancestor_of"; exit 1; }
+
+          git fetch --no-tags origin "refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}"
+          commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+
+          if git merge-base --is-ancestor "$commit" "origin/${BRANCH}"; then
+            echo "OK: ${REF_NAME} (${commit}) is reachable from origin/${BRANCH}"
+          else
+            echo "::error::Refusing to deploy ${REF_NAME} (${commit}): not reachable from origin/${BRANCH}. Merge to ${BRANCH} first, then tag."
+            exit 1
+          fi
+
   push:
+    needs: guard
     uses: ./.github/workflows/build.push.yaml
     with:
       app_name: ${{ inputs.app_name }}
@@ -54,6 +101,9 @@ jobs:
       build_context: ${{ inputs.build_context }}
       build_args: ${{ inputs.build_args }}
       runs_on: ${{ inputs.runs_on }}
+      skip_if_exists: ${{ inputs.reuse_existing_image }}
+      # When triggered by a git tag, also tag the image with it (e.g. v1.2.3) for readability.
+      extra_tags: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
     secrets:
       DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
 
@@ -78,20 +128,24 @@ jobs:
       DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
 
   summary:
-    needs: deploy
+    needs: [push, deploy]
     runs-on: ${{ inputs.runs_on }}
     steps:
       - run: |
-          echo "## Deployed to Production" >> $GITHUB_STEP_SUMMARY
-          echo "| | |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| App | ${{ inputs.app_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Environment | production |" >> $GITHUB_STEP_SUMMARY
-          echo "| Image | ${{ needs.push.outputs.image_url }} |" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Deployed to Production"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| App | ${{ inputs.app_name }} |"
+            echo "| Environment | production |"
+            echo "| Ref | ${{ github.ref_name }} |"
+            echo "| Image | ${{ needs.push.outputs.image_url }} |"
+            echo "| Image reused from staging | ${{ needs.push.outputs.reused }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   notify:
     if: always()
-    needs: [notify-start, push, approval, deploy, summary]
+    needs: [notify-start, guard, push, approval, deploy, summary]
     uses: ./.github/workflows/notify.telegram.yaml
     with:
       app_name: ${{ inputs.app_name }}
@@ -104,4 +158,3 @@ jobs:
     secrets:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
